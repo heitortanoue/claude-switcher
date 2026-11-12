@@ -53,7 +53,28 @@ PALETTE_HEX=(  "#D97757" "#E5484D" "#F5A524" "#30A46C" "#12A594" "#3E8EDF" "#8E4
 ICONS=(briefcase.fill house.fill laptopcomputer building.2.fill graduationcap.fill star.fill
        heart.fill flame.fill bolt.fill leaf.fill globe terminal.fill flask.fill book.fill
        gamecontroller.fill person.crop.circle.fill)
+ICON_LABELS=(Briefcase House Laptop Building "Graduation cap" Star
+       Heart Flame Bolt Leaf Globe Terminal Flask Book
+       "Game controller" Person)
 DEFAULT_ICON="person.crop.circle.fill"
+SF_SCALE="small"        # SF Symbol scale in the menu bar and dropdown
+
+# SwiftBar 2.1.1 colors/sizes SF Symbols only via sfconfig (base64 JSON); sfcolor is
+# ignored by it but kept for other versions. Prints the params for <symbol> [<#hex>].
+typeset -gA SF_CACHE
+sf() {
+  local sym="$1" hex="${2:-}" key="$1|$2" json
+  if [[ -z "${SF_CACHE[$key]:-}" ]]; then
+    if [[ -n "$hex" ]]; then
+      json="{\"renderingMode\":\"Palette\",\"colors\":[\"$hex\"],\"scale\":\"$SF_SCALE\",\"weight\":\"regular\"}"
+      SF_CACHE[$key]="sfimage=$sym sfcolor=$hex sfconfig=$(print -rn -- "$json" | /usr/bin/base64)"
+    else
+      json="{\"scale\":\"$SF_SCALE\",\"weight\":\"regular\"}"
+      SF_CACHE[$key]="sfimage=$sym sfconfig=$(print -rn -- "$json" | /usr/bin/base64)"
+    fi
+  fi
+  print -rn -- "${SF_CACHE[$key]}"
+}
 
 # Claude Code CLI (terminal `claude`) per-profile config. The CLI keeps its login in
 # $CLAUDE_CONFIG_DIR/.claude.json + a Keychain item keyed by that dir, so a separate
@@ -92,7 +113,8 @@ fx_notify() {
 }
 fx_refresh() {
   if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" refresh
-  else /usr/bin/open -g "swiftbar://refreshallplugins" >/dev/null 2>&1; fi
+  # Only when SwiftBar is running: launching it via this URL crashes SwiftBar 2.1.1.
+  elif /usr/bin/pgrep -xq SwiftBar; then /usr/bin/open -g "swiftbar://refreshallplugins" >/dev/null 2>&1; fi
 }
 
 # --------------------------------------------------------------------- helpers
@@ -494,7 +516,7 @@ cmd_menu() {
   if [[ -f "$STATE_FILE" ]]; then
     read -r kind a b < "$STATE_FILE" 2>/dev/null
     if [[ "$kind" == switching && "$b" == <-> ]] && (( EPOCHSECONDS - b >= 0 && EPOCHSECONDS - b < SWITCHING_STALE )) && valid_name "$a"; then
-      print -r -- "→ $a | sfimage=arrow.triangle.2.circlepath"
+      print -r -- "→ $a | $(sf arrow.triangle.2.circlepath)"
       print -r -- "---"
       print -r -- "Switching to $a… | disabled=true"
       return 0
@@ -515,18 +537,18 @@ cmd_menu() {
   compute_styles "${profs[@]}"
 
   if (( cancelled )); then
-    print -r -- "$CURRENT | sfimage=exclamationmark.triangle.fill sfcolor=#E5484D"
+    print -r -- "$CURRENT | $(sf exclamationmark.triangle.fill "#E5484D")"
     print -r -- "---"
     print -r -- "Switch cancelled: Claude did not quit | color=red"
   else
-    print -r -- "$CURRENT | sfimage=${STYLE_ICON[$CURRENT]} sfcolor=${STYLE_COLOR[$CURRENT]}"
+    print -r -- "$CURRENT | $(sf "${STYLE_ICON[$CURRENT]}" "${STYLE_COLOR[$CURRENT]}")"
     print -r -- "---"
   fi
   for n in "${profs[@]}"; do
     if [[ "$n" == "$CURRENT" ]]; then
-      print -r -- "$(profile_label "$n") | checked=true disabled=true sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
+      print -r -- "$(profile_label "$n") | checked=true disabled=true $(sf "${STYLE_ICON[$n]}" "${STYLE_COLOR[$n]}")"
     else
-      print -r -- "$(profile_label "$n") | bash=\"$SELF\" param1=$n terminal=false refresh=true sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
+      print -r -- "$(profile_label "$n") | bash=\"$SELF\" param1=$n terminal=false refresh=true $(sf "${STYLE_ICON[$n]}" "${STYLE_COLOR[$n]}")"
     fi
   done
   print -r -- "---"
@@ -535,11 +557,12 @@ cmd_menu() {
   print -r -- "Customize"
   local i sym custom
   for n in "${profs[@]}"; do
-    print -r -- "--$n | sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
+    print -r -- "--$n | $(sf "${STYLE_ICON[$n]}" "${STYLE_COLOR[$n]}")"
     print -r -- "----Icon"
-    for sym in "${ICONS[@]}"; do
+    for i in {1..${#ICONS}}; do
+      sym="${ICONS[$i]}"
       mark=""; [[ "$sym" == "${STYLE_ICON[$n]}" ]] && mark=" checked=true"
-      print -r -- "------$sym | sfimage=$sym$mark bash=\"$SELF\" param1=set-icon param2=$n param3=$sym terminal=false refresh=true"
+      print -r -- "------${ICON_LABELS[$i]} | $(sf "$sym" "${STYLE_COLOR[$n]}")$mark bash=\"$SELF\" param1=set-icon param2=$n param3=$sym terminal=false refresh=true"
     done
     mark=""; (( ${ICONS[(Ie)${STYLE_ICON[$n]}]} )) || mark=" checked=true"
     print -r -- "------Other symbol… | $mark bash=\"$SELF\" param1=icon-prompt param2=$n terminal=false refresh=true"
@@ -548,7 +571,7 @@ cmd_menu() {
     for i in {1..${#PALETTE_HEX}}; do
       mark=""
       if [[ "${PALETTE_HEX[$i]}" == "${STYLE_COLOR[$n]}" ]]; then mark=" checked=true"; custom=0; fi
-      print -r -- "------${PALETTE_NAMES[$i]} | sfimage=circle.fill sfcolor=${PALETTE_HEX[$i]}$mark bash=\"$SELF\" param1=set-color param2=$n param3=${PALETTE_HEX[$i]} terminal=false refresh=true"
+      print -r -- "------${PALETTE_NAMES[$i]} | $(sf circle.fill "${PALETTE_HEX[$i]}")$mark bash=\"$SELF\" param1=set-color param2=$n param3=${PALETTE_HEX[$i]} terminal=false refresh=true"
     done
     mark=""; (( custom )) && mark=" checked=true"
     print -r -- "------Custom… | $mark bash=\"$SELF\" param1=color-prompt param2=$n terminal=false refresh=true"

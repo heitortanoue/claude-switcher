@@ -23,7 +23,10 @@ chmod +x "$ROOT/swiftbar/claude-profile.1m.sh"
 ln -sf "$ROOT/swiftbar/claude-profile.1m.sh" "$PLUGDIR/claude-profile.1m.sh"
 echo "Linked plugin into $PLUGDIR"
 
-open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+# Launch SwiftBar normally if it isn't running; refreshing via URL would launch it
+# through the URL handler, which crashes SwiftBar 2.1.1.
+if pgrep -xq SwiftBar; then open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+else open -a SwiftBar; fi
 
 # Terminal `claude` follows the active profile (separate CLI login per profile).
 ZRC="${ZDOTDIR:-$HOME}/.zshrc"

@@ -28,7 +28,7 @@ echo "$*" >> "$STUB_LOG"
 # STUB_MENU_SNAPSHOT=<dir>: capture `menu` output at each refresh (to observe mid-switch state)
 if [[ "$1" == refresh && -n "$STUB_MENU_SNAPSHOT" ]]; then
   n=$(ls "$STUB_MENU_SNAPSHOT" | wc -l | tr -d ' ')
-  "$STUB_CLI" menu > "$STUB_MENU_SNAPSHOT/$n"
+  "$STUB_CLI" menu | sed 's/ sfconfig=[^ ]*//' > "$STUB_MENU_SNAPSHOT/$n"
 fi
 case "$1" in
   quit) touch "$STUB_STATE/quit" ;;
@@ -52,6 +52,8 @@ STUB
 mk_live() { mkdir -p "$LIVE"; echo "${1}" > "$LIVE/payload"; [[ -n "${2:-}" ]] && echo "$2" > "$LIVE/.claude-switch-profile"; return 0; }
 mk_profile() { mkdir -p "$PROF/$1"; echo "$2" > "$PROF/$1/payload"; echo "$1" > "$PROF/$1/.claude-switch-profile"; }
 calls() { cat "$STUB_LOG"; }
+# Menu output without the base64 sfconfig blobs (checked separately).
+menu_plain() { "$CLI" menu | sed 's/ sfconfig=[^ ]*//'; }
 marker() { cat "$1/.claude-switch-profile"; }
 
 @test "first run labels live folder work and switches to a new profile" {
@@ -299,7 +301,7 @@ marker() { cat "$1/.claude-switch-profile"; }
 
 @test "menu: header, checked+disabled active item, switch items, extras" {
   mk_live W work; mk_profile personal P
-  run "$CLI" menu
+  run menu_plain
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "work | sfimage=briefcase.fill sfcolor=#D97757" ]
   [ "${lines[1]}" = "---" ]
@@ -312,7 +314,7 @@ marker() { cat "$1/.claude-switch-profile"; }
 }
 
 @test "menu on a bad state still prints a header and exits 0" {
-  run "$CLI" menu
+  run menu_plain
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "✳ ?" ]
 }
@@ -405,11 +407,11 @@ mk_cli_json() { # <path> <email> <org>
 
 @test "menu header: active profile's icon and color, text uncolored" {
   mk_live W work
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=briefcase.fill sfcolor=#D97757" ]
   [[ "${lines[0]}" != *" color="* ]] || false
   mk_live W; rm -rf "$LIVE"; mk_live P personal
-  run "$CLI" menu
+  run menu_plain
   [[ "${lines[0]}" == "personal | sfimage=house.fill sfcolor=#"* ]] || false
 }
 
@@ -423,17 +425,17 @@ mk_cli_json() { # <path> <email> <org>
   [[ "$(head -1 "$T/snap/$(( $(ls "$T/snap" | wc -l) - 1 ))")" == "personal | sfimage=house.fill"* ]] || false
   [ "$(grep -c '^refresh$' "$STUB_LOG")" -ge 2 ]
   [ ! -e "$CLAUDE_SWITCH_DATA_DIR/.claude-switch-state" ]
-  run "$CLI" menu
+  run menu_plain
   [[ "${lines[0]}" == "personal | sfimage=house.fill"* ]] || false
 }
 
 @test "switching state: a fresh state file shows the arrow, a stale one is ignored" {
   mk_live W work
   echo "switching personal $(now)" > "$CLAUDE_SWITCH_DATA_DIR/.claude-switch-state"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "→ personal | sfimage=arrow.triangle.2.circlepath" ]
   echo "switching personal $(( $(now) - 61 ))" > "$CLAUDE_SWITCH_DATA_DIR/.claude-switch-state"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=briefcase.fill sfcolor=#D97757" ]
 }
 
@@ -467,12 +469,12 @@ mk_cli_json() { # <path> <email> <org>
   STUB_NEVER_QUITS=1 run "$CLI" personal
   [ "$status" -eq 11 ]
   [ "$(grep -c '^refresh$' "$STUB_LOG")" -ge 2 ]   # start + cancel
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=exclamationmark.triangle.fill sfcolor=#E5484D" ]
   [[ "$output" == *"Switch cancelled"* ]] || false
   [[ "$output" == *"personal — "* || "$output" == *"personal | bash="* ]] || false
   echo "cancelled $(( $(now) - 11 ))" > "$CLAUDE_SWITCH_DATA_DIR/.claude-switch-state"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=briefcase.fill sfcolor=#D97757" ]
   [[ "$output" != *"Switch cancelled"* ]] || false
 }
@@ -488,7 +490,7 @@ mk_cli_json() { # <path> <email> <org>
 
 @test "menu rows: per-profile icon and color, active checked, others switch in one click" {
   mk_live W work; mk_profile personal P; mk_profile zed Z
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\nwork | checked=true disabled=true sfimage=briefcase.fill sfcolor=#D97757\n'* ]] || false
   [[ "$output" == *$'\npersonal | bash="'*'claude-switch" param1=personal terminal=false refresh=true sfimage=house.fill sfcolor=#3E8EDF'$'\n'* ]] || false
   [[ "$output" == *$'\nzed | bash="'*'claude-switch" param1=zed terminal=false refresh=true sfimage=person.crop.circle.fill sfcolor=#E5484D'$'\n'* ]] || false
@@ -498,18 +500,18 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work
   mkdir -p "$T/config"
   printf 'work icon=flame.fill color=#00ff00\n' > "$CLAUDE_SWITCH_CONFIG"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=flame.fill sfcolor=#00FF00" ]
 }
 
 @test "defaults: unset profiles get deterministic distinct palette colors" {
   mk_live W work; mk_profile personal P; mk_profile alpha A; mk_profile beta B; mk_profile gamma G
-  run "$CLI" menu
+  run menu_plain
   first="$output"
   [[ "$output" == *$'\nalpha | bash='*"sfimage=person.crop.circle.fill sfcolor=#E5484D"* ]]   # red: orange is work's
   [[ "$output" == *$'\nbeta | bash='*"sfcolor=#F5A524"* ]]    # amber
   [[ "$output" == *$'\ngamma | bash='*"sfcolor=#30A46C"* ]]   # green
-  run "$CLI" menu
+  run menu_plain
   [ "$output" = "$first" ]
 }
 
@@ -517,7 +519,7 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work; mk_profile alpha A; mk_profile beta B
   mkdir -p "$T/config"
   printf 'beta color=#e5484d\n' > "$CLAUDE_SWITCH_CONFIG"
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\nalpha | bash='*"sfcolor=#F5A524"* ]] || false
   [[ "$output" == *$'\nbeta | bash='*"sfcolor=#E5484D"* ]] || false
 }
@@ -528,7 +530,7 @@ mk_cli_json() { # <path> <email> <org>
   echo work > "$T/home/.claude-profiles/.default-owner" 2>/dev/null || { mkdir -p "$T/home/.claude-profiles"; echo work > "$T/home/.claude-profiles/.default-owner"; }
   mk_cli_json "$T/home/.claude.json" heitor@x.com "Acme Org"
   mk_cli_json "$T/home/.claude-profiles/personal/.claude.json" me@home.org ""
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\nwork — heitor@x.com · Acme Org | checked=true disabled=true'* ]] || false
   [[ "$output" == *$'\npersonal — me@home.org | bash='* ]] || false
 }
@@ -537,7 +539,7 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W personal
   mk_profile work P
   mk_cli_json "$T/home/.claude.json" p@x.com Org1
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\npersonal — p@x.com · Org1 | checked=true'* ]] || false
 }
 
@@ -545,14 +547,14 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work; mk_profile personal P
   mkdir -p "$T/home/.claude-profiles"
   echo 'not json' > "$T/home/.claude-profiles/personal/.claude.json" 2>/dev/null || { mkdir -p "$T/home/.claude-profiles/personal"; echo 'not json' > "$T/home/.claude-profiles/personal/.claude.json"; }
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\nwork | checked=true disabled=true'* ]] || false
   [[ "$output" == *$'\npersonal | bash='* ]] || false
 }
 
 @test "menu: Customize has a submenu per profile with Icon and Color submenus" {
   mk_live W work; mk_profile personal P
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *$'\n---\nCustomize\n--personal | sfimage=house.fill sfcolor=#3E8EDF\n----Icon\n'* ]] || false
   [[ "$output" == *$'\n--work | sfimage=briefcase.fill sfcolor=#D97757\n----Icon\n'* ]] || false
   [ "$(echo "$output" | grep -c '^----Icon$')" -eq 2 ]
@@ -563,8 +565,8 @@ mk_cli_json() { # <path> <email> <org>
   c="$(echo "$output" | grep -n '^Open profiles folder' | cut -d: -f1)"
   [ "$a" -lt "$b" ]; [ "$b" -lt "$c" ]
   # 16 icons per profile, each shown as its own sfimage
-  [ "$(echo "$output" | grep -c '^------[a-z0-9.]* | sfimage=')" -eq 32 ]
-  [[ "$output" == *$'\n------gamecontroller.fill | sfimage=gamecontroller.fill bash="'*'claude-switch" param1=set-icon param2=work param3=gamecontroller.fill terminal=false refresh=true'* ]] || false
+  [ "$(echo "$output" | grep -c '^------[A-Za-z ]* | sfimage=[a-z0-9.]* sfcolor=#[0-9A-F]*\( checked=true\)\{0,1\} bash=.*param1=set-icon')" -eq 32 ]
+  [[ "$output" == *$'\n------Game controller | sfimage=gamecontroller.fill sfcolor=#D97757 bash="'*'claude-switch" param1=set-icon param2=work param3=gamecontroller.fill terminal=false refresh=true'* ]] || false
   [[ "$output" == *"------Other symbol… | "*"param1=icon-prompt param2=work"* ]] || false
   # 9 color presets per profile with dots, plus Custom…
   [ "$(echo "$output" | grep -c '^------[A-Za-z ]* | sfimage=circle.fill sfcolor=#')" -eq 18 ]
@@ -576,9 +578,9 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work
   mkdir -p "$T/config"
   printf 'work icon=flame.fill color=#8E4EC6\n' > "$CLAUDE_SWITCH_CONFIG"
-  run "$CLI" menu
+  run menu_plain
   [ "$(echo "$output" | grep -c '^------.* checked=true')" -eq 2 ]
-  [[ "$output" == *$'\n------flame.fill | sfimage=flame.fill checked=true bash='* ]] || false
+  [[ "$output" == *$'\n------Flame | sfimage=flame.fill sfcolor=#8E4EC6 checked=true bash='* ]] || false
   [[ "$output" == *$'\n------Purple | sfimage=circle.fill sfcolor=#8E4EC6 checked=true bash='* ]] || false
   [[ "$output" != *"briefcase.fill checked"* ]] || false
 }
@@ -587,7 +589,7 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work
   mkdir -p "$T/config"
   printf 'work icon=sun.max.fill color=#123456\n' > "$CLAUDE_SWITCH_CONFIG"
-  run "$CLI" menu
+  run menu_plain
   [[ "$output" == *"------Other symbol… |  checked=true bash="* ]] || false
   [[ "$output" == *"------Custom… |  checked=true bash="* ]] || false
   [ "$(echo "$output" | grep -c '^------.* checked=true')" -eq 2 ]
@@ -599,7 +601,7 @@ mk_cli_json() { # <path> <email> <org>
   [ "$status" -eq 0 ]
   [ "$(conf)" = "work icon=star.fill" ]
   grep -q '^refresh$' "$STUB_LOG"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=star.fill sfcolor=#D97757" ]
 }
 
@@ -661,6 +663,14 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work
   mkdir -p "$T/config"
   printf 'work icon=BAD!! color=blue\nbad/name icon=x\n' > "$CLAUDE_SWITCH_CONFIG"
-  run "$CLI" menu
+  run menu_plain
   [ "${lines[0]}" = "work | sfimage=briefcase.fill sfcolor=#D97757" ]
+}
+
+@test "menu: SF Symbols carry a small Palette sfconfig with the profile color" {
+  mk_live W work
+  run "$CLI" menu
+  [ "$status" -eq 0 ]
+  cfg="$(echo "${lines[0]}" | grep -o 'sfconfig=[^ ]*' | cut -d= -f2- | base64 -D)"
+  [ "$cfg" = '{"renderingMode":"Palette","colors":["#D97757"],"scale":"small","weight":"regular"}' ]
 }
