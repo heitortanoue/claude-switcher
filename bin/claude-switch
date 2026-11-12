@@ -554,11 +554,13 @@ cmd_menu() {
   print -r -- "---"
   print -r -- "New profile… | bash=\"$SELF\" param1=new-prompt terminal=false refresh=true"
   print -r -- "---"
-  print -r -- "Customize"
+  # Submenu parents get a no-op action: SwiftBar 2.1.1 draws actionless items disabled.
+  local noop="bash=/usr/bin/true terminal=false"
+  print -r -- "Customize | $noop"
   local i sym custom
   for n in "${profs[@]}"; do
-    print -r -- "--$n | $(sf "${STYLE_ICON[$n]}" "${STYLE_COLOR[$n]}")"
-    print -r -- "----Icon"
+    print -r -- "--$n | $(sf "${STYLE_ICON[$n]}" "${STYLE_COLOR[$n]}") $noop"
+    print -r -- "----Icon | $(sf paintbrush.pointed.fill) $noop"
     for i in {1..${#ICONS}}; do
       sym="${ICONS[$i]}"
       mark=""; [[ "$sym" == "${STYLE_ICON[$n]}" ]] && mark=" checked=true"
@@ -566,7 +568,7 @@ cmd_menu() {
     done
     mark=""; (( ${ICONS[(Ie)${STYLE_ICON[$n]}]} )) || mark=" checked=true"
     print -r -- "------Other symbol… | $mark bash=\"$SELF\" param1=icon-prompt param2=$n terminal=false refresh=true"
-    print -r -- "----Color"
+    print -r -- "----Color | $(sf paintpalette.fill) $noop"
     custom=1
     for i in {1..${#PALETTE_HEX}}; do
       mark=""

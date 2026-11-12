@@ -555,13 +555,15 @@ mk_cli_json() { # <path> <email> <org>
 @test "menu: Customize has a submenu per profile with Icon and Color submenus" {
   mk_live W work; mk_profile personal P
   run menu_plain
-  [[ "$output" == *$'\n---\nCustomize\n--personal | sfimage=house.fill sfcolor=#3E8EDF\n----Icon\n'* ]] || false
-  [[ "$output" == *$'\n--work | sfimage=briefcase.fill sfcolor=#D97757\n----Icon\n'* ]] || false
-  [ "$(echo "$output" | grep -c '^----Icon$')" -eq 2 ]
-  [ "$(echo "$output" | grep -c '^----Color$')" -eq 2 ]
+  noop='bash=/usr/bin/true terminal=false'
+  [[ "$output" == *$'\n---\nCustomize | '"$noop"$'\n--personal | sfimage=house.fill sfcolor=#3E8EDF '"$noop"$'\n----Icon | sfimage=paintbrush.pointed.fill '"$noop"$'\n'* ]] || false
+  [[ "$output" == *$'\n--work | sfimage=briefcase.fill sfcolor=#D97757 '"$noop"$'\n----Icon | '* ]] || false
+  # submenu parents carry an action so SwiftBar doesn't draw them disabled
+  [ "$(echo "$output" | grep -c "^----Icon | .*$noop\$")" -eq 2 ]
+  [ "$(echo "$output" | grep -c "^----Color | .*$noop\$")" -eq 2 ]
   # ordering: rows, New profile…, Customize, Open profiles folder
   a="$(echo "$output" | grep -n '^New profile' | cut -d: -f1)"
-  b="$(echo "$output" | grep -n '^Customize$' | cut -d: -f1)"
+  b="$(echo "$output" | grep -n '^Customize | ' | cut -d: -f1)"
   c="$(echo "$output" | grep -n '^Open profiles folder' | cut -d: -f1)"
   [ "$a" -lt "$b" ]; [ "$b" -lt "$c" ]
   # 17 icons per profile, each shown as its own sfimage
