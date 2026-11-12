@@ -138,7 +138,7 @@ A SwiftBar menu bar item shows the active profile next to the clock and battery 
 
 ## Out of Scope
 
-- Switching the Claude Code CLI account (`~/.claude`, its Keychain item). This could be a later `--cli` option.
+- Switching the Claude Code CLI account. This was originally out of scope and has since been added through `cli-dir` and `shell-init` (see the README). It switches only shells that load the hook.
 - Running two accounts side by side via `--user-data-dir`.
 - Sharing caches or the bundled Claude Code between profiles to save disk.
 - A native Swift menu bar app. SwiftBar is used now, and the CLI contract lets it be replaced later without changes.

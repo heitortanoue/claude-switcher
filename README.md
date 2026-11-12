@@ -19,7 +19,26 @@ claude-switch status     print the active profile
 claude-switch list       list profiles, active marked with *
 claude-switch new <name> create an empty profile and switch to it
 claude-switch menu       SwiftBar menu output
+claude-switch cli-dir    CLAUDE_CONFIG_DIR for the active profile (empty = default ~/.claude)
+claude-switch shell-init zsh function that makes terminal `claude` follow the active profile
 ```
+
+## Terminal `claude` per profile
+
+The Claude Code CLI keeps its login in `$CLAUDE_CONFIG_DIR/.claude.json` plus a Keychain item tied to that folder, so each profile can have its own CLI login. `install.sh` adds this line to `~/.zshrc`:
+
+```sh
+command -v claude-switch >/dev/null && eval "$(claude-switch shell-init)"  # claude-switch
+```
+
+It defines a `claude` function that asks `claude-switch cli-dir` on every run:
+
+- The profile that was active the first time (`work`) keeps the normal `~/.claude` and its existing login. The owner is recorded in `~/.claude-profiles/.default-owner`.
+- Every other profile gets `~/.claude-profiles/<name>`. Run `claude` once there and `/login` with that account.
+- Shared through symlinks to `~/.claude`: `settings.json`, `CLAUDE.md`, `skills`, `agents`, `commands`, `hooks`, `output-styles`, `plugins`, `projects` (sessions and memory), `history.jsonl`, `file-history`, `todos`, `plans`.
+- Kept per profile: the login, `.claude.json` (including user-scoped MCP servers and onboarding state), and org-managed remote settings and policy limits.
+- A `claude` session that is already running keeps its account. Only new runs pick up a switch.
+- The Code tab inside Claude Desktop is not affected. It always uses `~/.claude`.
 
 On first use the existing Claude data is labelled `work`. A new profile opens Claude signed out; sign in once. Names: letters, digits, `_`, `-`, up to 64 chars, starting with a letter or digit; command words (`toggle`, `status`, ...) are reserved.
 
@@ -45,6 +64,7 @@ A switch asks Claude to quit, waits up to 15 s for every Claude process (helpers
 - `CLAUDE_SWITCH_EFFECTS`: script replacing all side effects; called with `quit`, `is-running` (exit 0 = running), `launch`, `notify <msg>`, `refresh`.
 - `CLAUDE_SWITCH_QUIT_TIMEOUT` (default 15), `CLAUDE_SWITCH_POLL_INTERVAL` (default 0.5): tuning, used by tests.
 - `CLAUDE_SWITCH_FAIL_RENAME=N`: test hook, makes the Nth rename fail.
+- `CLAUDE_SWITCH_CLI_HOME`: home dir used for the CLI config folders (default `$HOME`; used by tests).
 
 ## Tests
 
@@ -59,7 +79,7 @@ Tests use a temp data dir and a stub; they never touch the real app. The real sw
 
 - Code-tab sessions and scratch workspaces belong to the profile that created them; they vanish while another profile is active and return when you switch back.
 - Never reset or delete the "Claude Safe Storage" Keychain item; every profile depends on it.
-- The Claude Code CLI login (`~/.claude`, its Keychain item) is not switched.
+- Terminal `claude` follows the profile only through the shell hook. Scripts and other shells that run the binary directly use `~/.claude`.
 - Don't switch during an app auto-update or "Reset App Data".
 - Each profile grows to roughly 1-1.5 GB.
 - Checked against Claude 5.1231.2; a future version that moves login state out of the data folder would break the folder-swap approach.

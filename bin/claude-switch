@@ -20,6 +20,7 @@
 #   CLAUDE_SWITCH_QUIT_TIMEOUT   seconds to wait for Claude to exit (default 15)
 #   CLAUDE_SWITCH_POLL_INTERVAL  seconds between process polls (default 0.5)
 #   CLAUDE_SWITCH_FAIL_RENAME    test hook: make the Nth rename of a switch fail
+#   CLAUDE_SWITCH_CLI_HOME       home dir for Claude Code CLI config (default: $HOME)
 
 zmodload zsh/datetime 2>/dev/null
 unsetopt NOMATCH 2>/dev/null
@@ -34,7 +35,19 @@ LOCK="$BASE/.claude-switch.lock"
 MARKER=".claude-switch-profile"
 QUIT_TIMEOUT="${CLAUDE_SWITCH_QUIT_TIMEOUT:-15}"
 POLL_INTERVAL="${CLAUDE_SWITCH_POLL_INTERVAL:-0.5}"
-RESERVED=(toggle status list new menu new-prompt help)
+RESERVED=(toggle status list new menu new-prompt help cli-dir shell-init)
+
+# Claude Code CLI (terminal `claude`) per-profile config. The CLI keeps its login in
+# $CLAUDE_CONFIG_DIR/.claude.json + a Keychain item keyed by that dir, so a separate
+# config dir per profile = a separate login. The profile that owned ~/.claude when
+# this was first used keeps it; other profiles get ~/.claude-profiles/<name>, with
+# the shared bits (settings, skills, memory, history...) symlinked to ~/.claude.
+CLI_HOME="${CLAUDE_SWITCH_CLI_HOME:-$HOME}"
+CLI_DEFAULT="$CLI_HOME/.claude"
+CLI_PROFILES="$CLI_HOME/.claude-profiles"
+CLI_OWNER="$CLI_PROFILES/.default-owner"
+CLI_SHARED=(settings.json CLAUDE.md skills agents commands hooks output-styles plugins
+            projects history.jsonl file-history todos plans)
 
 # ---------------------------------------------------------------- side effects
 # The only functions that touch the real app or the desktop.
@@ -245,6 +258,46 @@ do_switch() {
   return $EX_OK
 }
 
+# ------------------------------------------------------------------ claude cli
+# Prints the CLAUDE_CONFIG_DIR for the active profile, or nothing when the active
+# profile owns the default ~/.claude. Creates and links the dir as needed.
+cmd_cli_dir() {
+  detect_state || return $?
+  mkdir -p "$CLI_PROFILES" || { err "cannot create $CLI_PROFILES"; return $EX_STATE; }
+  local owner=""
+  [[ -f "$CLI_OWNER" ]] && owner="$(<"$CLI_OWNER")"
+  if ! valid_name "$owner"; then
+    owner="$CURRENT"; print -r -- "$owner" > "$CLI_OWNER"
+  fi
+  [[ "$CURRENT" == "$owner" ]] && return 0
+
+  local dir="$CLI_PROFILES/$CURRENT" item
+  mkdir -p "$dir" "$CLI_DEFAULT" || { err "cannot create $dir"; return $EX_STATE; }
+  for item in $CLI_SHARED; do
+    [[ -e "$dir/$item" || -L "$dir/$item" ]] && continue
+    # Link even if the shared item doesn't exist yet, except plain files
+    # (a dangling file link would break the CLI's first write).
+    if [[ -e "$CLI_DEFAULT/$item" ]]; then
+      ln -s "$CLI_DEFAULT/$item" "$dir/$item"
+    elif [[ "$item" != *.* ]]; then
+      mkdir -p "$CLI_DEFAULT/$item" && ln -s "$CLI_DEFAULT/$item" "$dir/$item"
+    fi
+  done
+  print -r -- "$dir"
+}
+
+cmd_shell_init() {
+  cat <<EOF
+# claude-switch: make terminal \`claude\` follow the active Claude profile.
+claude() {
+  local __csd
+  __csd="\$("${SELF}" cli-dir 2>/dev/null)"
+  if [[ -n "\$__csd" ]]; then CLAUDE_CONFIG_DIR="\$__csd" command claude "\$@"
+  else command claude "\$@"; fi
+}
+EOF
+}
+
 # -------------------------------------------------------------------- commands
 cmd_status() {
   detect_state || return $?
@@ -308,6 +361,7 @@ cmd_new_prompt() {
 usage() {
   cat <<'EOF'
 usage: claude-switch <name> | toggle | status | list | new <name> | menu
+                    | cli-dir | shell-init
 exit codes: 0 ok, 2 usage, 10 already active, 11 Claude did not quit,
             12 lock held, 13 invalid name/state, 14 rename failed (rolled back)
 EOF
@@ -323,6 +377,8 @@ main() {
     toggle)        cmd_toggle ;;
     menu)          cmd_menu ;;
     new-prompt)    cmd_new_prompt ;;
+    cli-dir)       cmd_cli_dir ;;
+    shell-init)    cmd_shell_init ;;
     new)
       [[ $# -eq 2 ]] || { usage >&2; return $EX_USAGE; }
       do_switch "$2" 1 ;;

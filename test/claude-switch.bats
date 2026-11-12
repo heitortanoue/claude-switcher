@@ -313,3 +313,75 @@ marker() { cat "$1/.claude-switch-profile"; }
   run "$CLI"
   [ "$status" -eq 2 ]
 }
+
+# ---------------------------------------------------------------- claude cli
+cli_setup() {
+  export CLAUDE_SWITCH_CLI_HOME="$T/home"
+  mkdir -p "$T/home/.claude/skills"
+  echo '{}' > "$T/home/.claude/settings.json"
+  echo secret > "$T/home/.claude/.claude.json"
+}
+
+@test "cli-dir: the first active profile owns ~/.claude and gets no override" {
+  cli_setup; mk_live W work
+  run "$CLI" cli-dir
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(cat "$T/home/.claude-profiles/.default-owner")" = "work" ]
+}
+
+@test "cli-dir: another profile gets its own dir with shared items linked" {
+  cli_setup; mk_live W work
+  "$CLI" cli-dir >/dev/null            # work claims ~/.claude
+  mk_profile personal P
+  "$CLI" personal >/dev/null
+  run "$CLI" cli-dir
+  [ "$status" -eq 0 ]
+  [ "$output" = "$T/home/.claude-profiles/personal" ]
+  [ -L "$output/skills" ] && [ "$(readlink "$output/skills")" = "$T/home/.claude/skills" ]
+  [ -L "$output/settings.json" ]
+  [ -d "$output/projects" ] && [ -L "$output/projects" ]   # missing dirs are created + linked
+  [ ! -e "$output/.claude.json" ]                          # login is never shared
+  [ ! -e "$output/CLAUDE.md" ]                             # missing files are not linked
+}
+
+@test "cli-dir: switching back to the owner removes the override" {
+  cli_setup; mk_live W work
+  "$CLI" cli-dir >/dev/null
+  "$CLI" personal >/dev/null
+  "$CLI" work >/dev/null
+  run "$CLI" cli-dir
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "cli-dir: is idempotent and keeps existing per-profile files" {
+  cli_setup; mk_live W work
+  "$CLI" cli-dir >/dev/null
+  "$CLI" personal >/dev/null
+  d="$("$CLI" cli-dir)"
+  echo mine > "$d/.claude.json"
+  run "$CLI" cli-dir
+  [ "$status" -eq 0 ] && [ "$output" = "$d" ]
+  [ "$(cat "$d/.claude.json")" = "mine" ]
+}
+
+@test "cli-dir: on a bad state fails with 13 and prints nothing" {
+  cli_setup
+  run "$CLI" cli-dir
+  [ "$status" -eq 13 ]
+}
+
+@test "shell-init: defines a claude function that uses cli-dir" {
+  run "$CLI" shell-init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude() {"* ]]
+  [[ "$output" == *"cli-dir"* ]]
+  [[ "$output" == *"CLAUDE_CONFIG_DIR="* ]]
+}
+
+@test "cli-dir and shell-init are reserved profile names" {
+  mk_live W work
+  run "$CLI" new cli-dir;    [ "$status" -eq 2 ] || [ "$status" -eq 13 ]
+  run "$CLI" new shell-init; [ "$status" -eq 2 ] || [ "$status" -eq 13 ]
+}
