@@ -21,6 +21,8 @@
 #   CLAUDE_SWITCH_POLL_INTERVAL  seconds between process polls (default 0.5)
 #   CLAUDE_SWITCH_FAIL_RENAME    test hook: make the Nth rename of a switch fail
 #   CLAUDE_SWITCH_CLI_HOME       home dir for Claude Code CLI config (default: $HOME)
+#   CLAUDE_SWITCH_CONFIG         profile appearance file (default:
+#                                $HOME/.config/claude-switch/profiles.conf)
 
 zmodload zsh/datetime 2>/dev/null
 unsetopt NOMATCH 2>/dev/null
@@ -35,7 +37,23 @@ LOCK="$BASE/.claude-switch.lock"
 MARKER=".claude-switch-profile"
 QUIT_TIMEOUT="${CLAUDE_SWITCH_QUIT_TIMEOUT:-15}"
 POLL_INTERVAL="${CLAUDE_SWITCH_POLL_INTERVAL:-0.5}"
-RESERVED=(toggle status list new menu new-prompt help cli-dir shell-init)
+RESERVED=(toggle status list new menu new-prompt help cli-dir shell-init
+          set-icon set-color icon-prompt color-prompt)
+
+# Menu bar appearance. profiles.conf: one line per profile,
+#   <name> icon=<sf symbol> color=#RRGGBB
+# (either key may be missing; '#' lines are comments and are preserved).
+CONFIG="${CLAUDE_SWITCH_CONFIG:-$HOME/.config/claude-switch/profiles.conf}"
+# Transient state for the menu header: "switching <target> <epoch>" or "cancelled <epoch>".
+STATE_FILE="$BASE/.claude-switch-state"
+SWITCHING_STALE=60      # a "switching" state older than this is ignored (crashed switch)
+CANCELLED_SHOW=10       # how long the red cancelled header is shown
+PALETTE_NAMES=("Claude orange" Red Amber Green Teal Blue Purple Pink Gray)
+PALETTE_HEX=(  "#D97757" "#E5484D" "#F5A524" "#30A46C" "#12A594" "#3E8EDF" "#8E4EC6" "#E93D82" "#8B8D98")
+ICONS=(briefcase.fill house.fill laptopcomputer building.2.fill graduationcap.fill star.fill
+       heart.fill flame.fill bolt.fill leaf.fill globe terminal.fill flask.fill book.fill
+       gamecontroller.fill person.crop.circle.fill)
+DEFAULT_ICON="person.crop.circle.fill"
 
 # Claude Code CLI (terminal `claude`) per-profile config. The CLI keeps its login in
 # $CLAUDE_CONFIG_DIR/.claude.json + a Keychain item keyed by that dir, so a separate
@@ -123,7 +141,13 @@ detect_state() {
 # ------------------------------------------------------------------------ lock
 HAVE_LOCK=0
 release_lock() {
-  if (( HAVE_LOCK )); then rm -rf "$LOCK"; HAVE_LOCK=0; fi
+  # The "switching" state lives exactly as long as the lock, on every exit path.
+  if (( HAVE_LOCK )); then rm -f "$STATE_FILE"; rm -rf "$LOCK"; HAVE_LOCK=0; fi
+}
+abort_switch() { release_lock; fx_refresh || true; }   # failure path: drop "switching", repaint
+write_state() {   # write_state <word...>: atomic replace of the header state file
+  local tmp="$STATE_FILE.$$"
+  print -r -- "$*" > "$tmp" 2>/dev/null && /bin/mv -f "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp"
 }
 acquire_lock() {
   mkdir -p "$BASE" 2>/dev/null
@@ -186,6 +210,8 @@ do_switch() {
   acquire_lock || return $?
   trap 'release_lock' EXIT
   trap 'release_lock; exit 130' INT TERM HUP
+  write_state switching "$target" "$EPOCHSECONDS"
+  fx_refresh || true
 
   # Ask Claude to quit (only if running: quitting a stopped app can launch it).
   if fx_is_running; then
@@ -195,6 +221,10 @@ do_switch() {
     while fx_is_running; do
       if (( EPOCHREALTIME >= deadline )); then
         release_lock
+        write_state cancelled "$EPOCHSECONDS"
+        fx_refresh || true
+        # Make SwiftBar drop the red header once it expires (the plugin only polls every minute).
+        [[ -z "${CLAUDE_SWITCH_EFFECTS:-}" ]] && { ( sleep $((CANCELLED_SHOW + 1)); fx_refresh ) </dev/null >/dev/null 2>&1 &! }
         err "Claude did not quit within ${QUIT_TIMEOUT}s; switch cancelled. Close any running sessions and try again."
         fx_notify "Switch cancelled: Claude did not quit. Close running sessions and retry." || true
         return $EX_TIMEOUT
@@ -204,8 +234,8 @@ do_switch() {
   fi
 
   # State could have changed while waiting; re-check.
-  detect_state || { release_lock; return $?; }
-  [[ "$CURRENT" == "$current" ]] || { release_lock; err "state changed during switch"; return $EX_STATE; }
+  detect_state || { local rc=$?; abort_switch; return $rc; }
+  [[ "$CURRENT" == "$current" ]] || { abort_switch; err "state changed during switch"; return $EX_STATE; }
 
   local wrote_label=0 created_target=0 moved_out=0
   rollback() {
@@ -214,11 +244,11 @@ do_switch() {
     (( wrote_label )) && rm -f "$LIVE/$MARKER"
   }
 
-  mkdir -p "$PROFILES" 2>/dev/null || { release_lock; err "cannot create $PROFILES"; return $EX_RENAME; }
+  mkdir -p "$PROFILES" 2>/dev/null || { abort_switch; err "cannot create $PROFILES"; return $EX_RENAME; }
 
   if (( label )); then
     print -r -- "$current" > "$LIVE/$MARKER" 2>/dev/null \
-      || { release_lock; err "cannot label live folder"; return $EX_RENAME; }
+      || { abort_switch; err "cannot label live folder"; return $EX_RENAME; }
     wrote_label=1
   fi
 
@@ -228,7 +258,7 @@ do_switch() {
       created_target=1
     else
       rm -rf "$PROFILES/$target" 2>/dev/null
-      rollback; release_lock
+      rollback; abort_switch
       err "cannot create profile '$target'"; return $EX_RENAME
     fi
   elif [[ ! -f "$PROFILES/$target/$MARKER" ]]; then
@@ -237,7 +267,7 @@ do_switch() {
 
   # Step 5: live -> Claude-profiles/<current>
   if ! do_rename "$LIVE" "$PROFILES/$current"; then
-    rollback; release_lock
+    rollback; abort_switch
     err "rename failed (live folder -> stored profile); nothing changed"
     return $EX_RENAME
   fi
@@ -245,7 +275,7 @@ do_switch() {
 
   # Step 6: Claude-profiles/<target> -> live
   if ! do_rename "$PROFILES/$target" "$LIVE"; then
-    rollback; release_lock
+    rollback; abort_switch
     err "rename failed (profile '$target' -> live folder); rolled back"
     return $EX_RENAME
   fi
@@ -323,8 +353,155 @@ cmd_toggle() {
   do_switch "${others[1]}" 0
 }
 
+# ------------------------------------------------------------------ appearance
+typeset -gA CONF_ICON CONF_COLOR STYLE_ICON STYLE_COLOR
+
+is_comment_line() { [[ "$1" == [[:space:]]#'#'* ]]; }
+
+# Fills CONF_ICON / CONF_COLOR from profiles.conf (invalid values are ignored).
+load_config() {
+  CONF_ICON=(); CONF_COLOR=()
+  [[ -f "$CONFIG" ]] || return 0
+  local line name tok val
+  local -a w
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    is_comment_line "$line" && continue
+    w=( ${=line} )
+    (( ${#w} )) || continue
+    name="${w[1]}"
+    valid_name "$name" || continue
+    for tok in "${(@)w[2,-1]}"; do
+      case "$tok" in
+        icon=*)  val="${tok#icon=}";  [[ "$val" =~ '^[a-z0-9.]+$' ]] && CONF_ICON[$name]="$val" ;;
+        color=*) val="${tok#color=}"; [[ "$val" =~ '^#[0-9A-Fa-f]{6}$' ]] && CONF_COLOR[$name]="${(U)val}" ;;
+      esac
+    done
+  done < "$CONFIG"
+}
+
+# compute_styles <name...> (sorted): fills STYLE_ICON / STYLE_COLOR with the configured
+# value or the default. work/personal have fixed defaults; every other profile without a
+# color takes the first palette color not used by another profile (in name order), so the
+# result is deterministic. If the palette runs out it wraps around.
+compute_styles() {
+  load_config
+  STYLE_ICON=(); STYLE_COLOR=()
+  local n c pick i=0
+  local -a used rest
+  for n in "$@"; do
+    if [[ -n "${CONF_COLOR[$n]:-}" ]]; then STYLE_COLOR[$n]="${CONF_COLOR[$n]}"
+    elif [[ "$n" == work ]]; then STYLE_COLOR[$n]="${PALETTE_HEX[1]}"
+    elif [[ "$n" == personal ]]; then STYLE_COLOR[$n]="${PALETTE_HEX[6]}"
+    else rest+=("$n"); continue; fi
+    used+=("${STYLE_COLOR[$n]}")
+  done
+  for n in "${rest[@]}"; do
+    pick=""
+    for c in "${PALETTE_HEX[@]}"; do
+      (( ${used[(Ie)$c]} )) || { pick="$c"; break; }
+    done
+    [[ -n "$pick" ]] || pick="${PALETTE_HEX[$(( i % ${#PALETTE_HEX} + 1 ))]}"
+    STYLE_COLOR[$n]="$pick"; used+=("$pick"); i=$((i + 1))
+  done
+  for n in "$@"; do
+    if [[ -n "${CONF_ICON[$n]:-}" ]]; then STYLE_ICON[$n]="${CONF_ICON[$n]}"
+    elif [[ "$n" == work ]]; then STYLE_ICON[$n]="${ICONS[1]}"
+    elif [[ "$n" == personal ]]; then STYLE_ICON[$n]="${ICONS[2]}"
+    else STYLE_ICON[$n]="$DEFAULT_ICON"; fi
+  done
+}
+
+# Path of the Claude Code CLI config that holds the login of <profile>.
+profile_cli_json() {
+  local owner=""
+  [[ -f "$CLI_OWNER" ]] && owner="$(<"$CLI_OWNER")"
+  owner="${owner%%$'\n'*}"
+  valid_name "$owner" || owner="$CURRENT"
+  if [[ "$1" == "$owner" ]]; then print -r -- "$CLI_HOME/.claude.json"
+  else print -r -- "$CLI_PROFILES/$1/.claude.json"; fi
+}
+
+# "name — email · Org" with whatever is known; just "name" when nothing is.
+profile_label() {
+  local n="$1" f email org
+  f="$(profile_cli_json "$n")"
+  if [[ -f "$f" ]]; then
+    email="$(/usr/bin/plutil -extract oauthAccount.emailAddress raw -o - "$f" 2>/dev/null)"
+    org="$(/usr/bin/plutil -extract oauthAccount.organizationName raw -o - "$f" 2>/dev/null)"
+    email="${${email//|/ }//$'\n'/ }"; org="${${org//|/ }//$'\n'/ }"
+  fi
+  if [[ -n "$email" && -n "$org" ]]; then print -r -- "$n — $email · $org"
+  elif [[ -n "$email" ]]; then print -r -- "$n — $email"
+  elif [[ -n "$org" ]]; then print -r -- "$n — $org"
+  else print -r -- "$n"; fi
+}
+
+# Does <name> exist as the live or a stored profile? Sets CURRENT as a side effect.
+profile_exists() {
+  detect_state || return $EX_STATE
+  [[ "$1" == "$CURRENT" || -d "$PROFILES/$1" ]]
+}
+
+# conf_set <name> <key> <value>: update (or add) the line of <name> in profiles.conf,
+# keeping every other line. Atomic: temp file in the same dir + mv.
+conf_set() {
+  local name="$1" key="$2" value="$3" dir="${CONFIG:h}" tmp line t found=0 seen
+  local -a w new
+  mkdir -p "$dir" 2>/dev/null || return 1
+  tmp="$(/usr/bin/mktemp "$dir/.profiles.conf.XXXXXX")" || return 1
+  if [[ -f "$CONFIG" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if ! is_comment_line "$line"; then
+        w=( ${=line} )
+        if [[ "${w[1]:-}" == "$name" ]]; then
+          new=(); seen=0
+          for t in "${(@)w[2,-1]}"; do
+            if [[ "$t" == "$key="* ]]; then (( seen )) || new+=("$key=$value"); seen=1
+            else new+=("$t"); fi
+          done
+          (( seen )) || new+=("$key=$value")
+          line="$name ${(j: :)new}"; found=1
+        fi
+      fi
+      print -r -- "$line" >> "$tmp"
+    done < "$CONFIG"
+  fi
+  (( found )) || print -r -- "$name $key=$value" >> "$tmp"
+  /bin/chmod 644 "$tmp" 2>/dev/null
+  /bin/mv -f "$tmp" "$CONFIG" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# set-icon / set-color <profile> <value>
+cmd_set_style() {
+  local key="$1" name="${2:-}" value="${3:-}"
+  [[ $# -eq 3 && -n "$name" && -n "$value" ]] || { usage >&2; return $EX_USAGE; }
+  valid_name "$name" || { err "invalid profile name: '$name'"; return $EX_STATE; }
+  if [[ "$key" == icon ]]; then
+    [[ "$value" =~ '^[a-z0-9.]+$' ]] || { err "invalid SF Symbol name: '$value' (use lowercase letters, digits, dots)"; return $EX_USAGE; }
+  else
+    [[ "$value" =~ '^#[0-9A-Fa-f]{6}$' ]] || { err "invalid color: '$value' (use #RRGGBB)"; return $EX_USAGE; }
+    value="${(U)value}"
+  fi
+  profile_exists "$name" || { [[ -n "$LAST_ERR" ]] || err "unknown profile: '$name'"; return $EX_STATE; }
+  conf_set "$name" "$key" "$value" || { err "cannot write $CONFIG"; return $EX_STATE; }
+  fx_refresh || true
+  print -r -- "$name: $key=$value"
+}
+
+# ------------------------------------------------------------------------ menu
 cmd_menu() {
-  local n
+  local n kind a b ts target="" cancelled=0 mark
+  if [[ -f "$STATE_FILE" ]]; then
+    read -r kind a b < "$STATE_FILE" 2>/dev/null
+    if [[ "$kind" == switching && "$b" == <-> ]] && (( EPOCHSECONDS - b >= 0 && EPOCHSECONDS - b < SWITCHING_STALE )) && valid_name "$a"; then
+      print -r -- "→ $a | sfimage=arrow.triangle.2.circlepath"
+      print -r -- "---"
+      print -r -- "Switching to $a… | disabled=true"
+      return 0
+    elif [[ "$kind" == cancelled && "$a" == <-> ]] && (( EPOCHSECONDS - a >= 0 && EPOCHSECONDS - a < CANCELLED_SHOW )); then
+      cancelled=1
+    fi
+  fi
   if ! detect_state 2>/dev/null; then
     print -r -- "✳ ?"
     print -r -- "---"
@@ -333,18 +510,89 @@ cmd_menu() {
     print -r -- "Open profiles folder | bash=/usr/bin/open param1=\"$PROFILES\" terminal=false"
     return 0
   fi
-  print -r -- "✳ $CURRENT"
-  print -r -- "---"
-  { print -r -- "$CURRENT"; stored_profiles; } | LC_ALL=C sort -u | while IFS= read -r n; do
+  local -a profs
+  profs=( ${(f)"$({ print -r -- "$CURRENT"; stored_profiles; } | LC_ALL=C sort -u)"} )
+  compute_styles "${profs[@]}"
+
+  if (( cancelled )); then
+    print -r -- "$CURRENT | sfimage=exclamationmark.triangle.fill sfcolor=#E5484D"
+    print -r -- "---"
+    print -r -- "Switch cancelled: Claude did not quit | color=red"
+  else
+    print -r -- "$CURRENT | sfimage=${STYLE_ICON[$CURRENT]} sfcolor=${STYLE_COLOR[$CURRENT]}"
+    print -r -- "---"
+  fi
+  for n in "${profs[@]}"; do
     if [[ "$n" == "$CURRENT" ]]; then
-      print -r -- "$n | checked=true disabled=true"
+      print -r -- "$(profile_label "$n") | checked=true disabled=true sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
     else
-      print -r -- "$n | bash=\"$SELF\" param1=$n terminal=false refresh=true"
+      print -r -- "$(profile_label "$n") | bash=\"$SELF\" param1=$n terminal=false refresh=true sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
     fi
   done
   print -r -- "---"
   print -r -- "New profile… | bash=\"$SELF\" param1=new-prompt terminal=false refresh=true"
+  print -r -- "---"
+  print -r -- "Customize"
+  local i sym custom
+  for n in "${profs[@]}"; do
+    print -r -- "--$n | sfimage=${STYLE_ICON[$n]} sfcolor=${STYLE_COLOR[$n]}"
+    print -r -- "----Icon"
+    for sym in "${ICONS[@]}"; do
+      mark=""; [[ "$sym" == "${STYLE_ICON[$n]}" ]] && mark=" checked=true"
+      print -r -- "------$sym | sfimage=$sym$mark bash=\"$SELF\" param1=set-icon param2=$n param3=$sym terminal=false refresh=true"
+    done
+    mark=""; (( ${ICONS[(Ie)${STYLE_ICON[$n]}]} )) || mark=" checked=true"
+    print -r -- "------Other symbol… | $mark bash=\"$SELF\" param1=icon-prompt param2=$n terminal=false refresh=true"
+    print -r -- "----Color"
+    custom=1
+    for i in {1..${#PALETTE_HEX}}; do
+      mark=""
+      if [[ "${PALETTE_HEX[$i]}" == "${STYLE_COLOR[$n]}" ]]; then mark=" checked=true"; custom=0; fi
+      print -r -- "------${PALETTE_NAMES[$i]} | sfimage=circle.fill sfcolor=${PALETTE_HEX[$i]}$mark bash=\"$SELF\" param1=set-color param2=$n param3=${PALETTE_HEX[$i]} terminal=false refresh=true"
+    done
+    mark=""; (( custom )) && mark=" checked=true"
+    print -r -- "------Custom… | $mark bash=\"$SELF\" param1=color-prompt param2=$n terminal=false refresh=true"
+  done
+  print -r -- "---"
   print -r -- "Open profiles folder | bash=/usr/bin/open param1=\"$PROFILES\" terminal=false"
+}
+
+# Internal: ask for an SF Symbol name with a dialog, then run `set-icon`.
+# The symbol is verified with AppKit through osascript's JavaScript engine
+# (NSImage systemSymbolName); if that check itself cannot run, the format is accepted.
+cmd_icon_prompt() {
+  local name="${1:-}" cur sym ok
+  profile_exists "$name" || { err "unknown profile: '$name'"; return $EX_STATE; }
+  load_config; compute_styles "$name"; cur="${STYLE_ICON[$name]}"
+  sym="$(/usr/bin/osascript -e "text returned of (display dialog \"SF Symbol name for '$name' (e.g. star.fill):\" default answer \"$cur\" buttons {\"Cancel\", \"Set\"} default button \"Set\")" 2>/dev/null)" || return 0
+  sym="${sym//[[:space:]]/}"
+  [[ -n "$sym" ]] || return 0
+  if [[ ! "$sym" =~ '^[a-z0-9.]+$' ]]; then
+    fx_notify "Not a valid symbol name: use lowercase letters, digits and dots" || true; return $EX_USAGE
+  fi
+  ok="$(/usr/bin/osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) { return $.NSImage.imageWithSystemSymbolNameAccessibilityDescription(a[0], $()).isNil() ? "no" : "yes"; }' "$sym" 2>/dev/null)"
+  if [[ "$ok" == no ]]; then
+    fx_notify "No SF Symbol named '$sym'" || true; return $EX_USAGE
+  fi
+  "$SELF" set-icon "$name" "$sym" >/dev/null
+}
+
+# Internal: pick a color with the system color panel, then run `set-color`.
+# `choose color` returns 16-bit RGB ("65535, 0, 0"); each channel becomes 8-bit hex.
+cmd_color_prompt() {
+  local name="${1:-}" cur rgb hex="#" v
+  local -a parts
+  profile_exists "$name" || { err "unknown profile: '$name'"; return $EX_STATE; }
+  load_config; compute_styles "$name"; cur="${STYLE_COLOR[$name]}"
+  local d="$(( 16#${cur[2,3]} * 257 )), $(( 16#${cur[4,5]} * 257 )), $(( 16#${cur[6,7]} * 257 ))"
+  rgb="$(/usr/bin/osascript -e 'tell current application to activate' -e "choose color default color {$d}" 2>/dev/null)" || return 0
+  parts=( ${(s:, :)rgb} )
+  (( ${#parts} == 3 )) || return 0
+  for v in "${parts[@]}"; do
+    [[ "$v" == <-> ]] || return 0
+    hex+="$(printf '%02X' $(( (v + 128) / 257 > 255 ? 255 : (v + 128) / 257 )))"
+  done
+  "$SELF" set-color "$name" "$hex" >/dev/null
 }
 
 # Internal: ask for a name with a dialog, then run `new <name>`.
@@ -361,7 +609,8 @@ cmd_new_prompt() {
 usage() {
   cat <<'EOF'
 usage: claude-switch <name> | toggle | status | list | new <name> | menu
-                    | cli-dir | shell-init
+                    | cli-dir | shell-init | set-icon <name> <symbol>
+                    | set-color <name> <#RRGGBB>
 exit codes: 0 ok, 2 usage, 10 already active, 11 Claude did not quit,
             12 lock held, 13 invalid name/state, 14 rename failed (rolled back)
 EOF
@@ -377,6 +626,10 @@ main() {
     toggle)        cmd_toggle ;;
     menu)          cmd_menu ;;
     new-prompt)    cmd_new_prompt ;;
+    icon-prompt)   cmd_icon_prompt "${2:-}" ;;
+    color-prompt)  cmd_color_prompt "${2:-}" ;;
+    set-icon)      cmd_set_style icon "$@[2,-1]" ;;
+    set-color)     cmd_set_style color "$@[2,-1]" ;;
     cli-dir)       cmd_cli_dir ;;
     shell-init)    cmd_shell_init ;;
     new)
