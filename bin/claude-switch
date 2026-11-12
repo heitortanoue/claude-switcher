@@ -1,0 +1,336 @@
+#!/bin/zsh
+# claude-switch: swap Claude Desktop data folders between accounts (profiles).
+# See README.md and SPEC.md. macOS built-ins only.
+#
+# Exit codes:
+#    0  success
+#    2  usage error
+#   10  already active (nothing done)
+#   11  Claude did not quit within the timeout (nothing changed)
+#   12  another switch holds the lock
+#   13  invalid name or invalid state (nothing changed)
+#   14  rename failed (renames that succeeded were rolled back)
+#
+# Environment:
+#   CLAUDE_SWITCH_DATA_DIR       base data dir (default: $HOME/Library/Application Support)
+#   CLAUDE_SWITCH_EFFECTS        path to a script replacing all real side effects.
+#                                Called as: <script> quit | is-running | launch
+#                                           | notify <message> | refresh
+#                                is-running exits 0 when Claude (incl. helpers) runs.
+#   CLAUDE_SWITCH_QUIT_TIMEOUT   seconds to wait for Claude to exit (default 15)
+#   CLAUDE_SWITCH_POLL_INTERVAL  seconds between process polls (default 0.5)
+#   CLAUDE_SWITCH_FAIL_RENAME    test hook: make the Nth rename of a switch fail
+
+zmodload zsh/datetime 2>/dev/null
+unsetopt NOMATCH 2>/dev/null
+
+readonly EX_OK=0 EX_USAGE=2 EX_ACTIVE=10 EX_TIMEOUT=11 EX_LOCKED=12 EX_STATE=13 EX_RENAME=14
+
+readonly SELF="${0:A}"
+BASE="${CLAUDE_SWITCH_DATA_DIR:-$HOME/Library/Application Support}"
+LIVE="$BASE/Claude"
+PROFILES="$BASE/Claude-profiles"
+LOCK="$BASE/.claude-switch.lock"
+MARKER=".claude-switch-profile"
+QUIT_TIMEOUT="${CLAUDE_SWITCH_QUIT_TIMEOUT:-15}"
+POLL_INTERVAL="${CLAUDE_SWITCH_POLL_INTERVAL:-0.5}"
+RESERVED=(toggle status list new menu new-prompt help)
+
+# ---------------------------------------------------------------- side effects
+# The only functions that touch the real app or the desktop.
+fx_quit() {
+  if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" quit
+  else /usr/bin/osascript -e 'quit app "Claude"' >/dev/null 2>&1; fi
+}
+fx_is_running() {
+  if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" is-running
+  # Match the app bundle (main app + helpers) AND anything executing from the live
+  # data folder (e.g. Claude Code sessions run from <live>/claude-code/...).
+  else /usr/bin/pgrep -f "/Applications/Claude\\.app/|${LIVE}/" >/dev/null 2>&1; fi
+}
+fx_launch() {
+  if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" launch
+  else /usr/bin/open -a Claude; fi
+}
+fx_notify() {
+  if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" notify "$1"
+  else
+    local msg="${1//\\/\\\\}"; msg="${msg//\"/\\\"}"
+    /usr/bin/osascript -e "display notification \"$msg\" with title \"claude-switch\"" >/dev/null 2>&1
+  fi
+}
+fx_refresh() {
+  if [[ -n "${CLAUDE_SWITCH_EFFECTS:-}" ]]; then "$CLAUDE_SWITCH_EFFECTS" refresh
+  else /usr/bin/open -g "swiftbar://refreshallplugins" >/dev/null 2>&1; fi
+}
+
+# --------------------------------------------------------------------- helpers
+LAST_ERR=""
+err() { LAST_ERR="$*"; print -u2 -r -- "claude-switch: $*"; }
+
+valid_name() {
+  local n="$1"
+  [[ "$n" =~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' ]] || return 1
+  (( ${RESERVED[(Ie)$n]} )) && return 1
+  return 0
+}
+
+# Sorted names of stored profiles (valid names only).
+stored_profiles() {
+  local d n
+  [[ -d "$PROFILES" ]] || return 0
+  for d in "$PROFILES"/*(N/); do
+    n="${d:t}"
+    valid_name "$n" && print -r -- "$n"
+  done | LC_ALL=C sort
+}
+
+# Sets CURRENT and (maybe) NEEDS_LABEL. Returns EX_STATE with message on bad state.
+detect_state() {
+  CURRENT=""; NEEDS_LABEL=0
+  if [[ ! -d "$LIVE" ]]; then
+    err "live data folder not found: $LIVE"; return $EX_STATE
+  fi
+  if [[ -f "$LIVE/$MARKER" ]]; then
+    CURRENT="$(<"$LIVE/$MARKER")"
+    CURRENT="${CURRENT%%$'\n'*}"
+    if ! valid_name "$CURRENT"; then
+      err "live folder marker holds an invalid profile name"; return $EX_STATE
+    fi
+    return 0
+  fi
+  if [[ -n "$(stored_profiles)" ]]; then
+    err "live data folder has no profile marker but stored profiles exist; refusing to guess"
+    return $EX_STATE
+  fi
+  CURRENT="work"; NEEDS_LABEL=1
+  return 0
+}
+
+# ------------------------------------------------------------------------ lock
+HAVE_LOCK=0
+release_lock() {
+  if (( HAVE_LOCK )); then rm -rf "$LOCK"; HAVE_LOCK=0; fi
+}
+acquire_lock() {
+  mkdir -p "$BASE" 2>/dev/null
+  local pid mtime tries=0
+  while (( tries < 2 )); do
+    if mkdir "$LOCK" 2>/dev/null; then
+      print -r -- "$$" > "$LOCK/pid"
+      HAVE_LOCK=1
+      return 0
+    fi
+    pid=""; [[ -f "$LOCK/pid" ]] && pid="$(<"$LOCK/pid")"
+    if [[ "$pid" == <-> ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        err "another switch is in progress (pid $pid)"; return $EX_LOCKED
+      fi
+    else
+      # No pid yet: either being created right now, or the owner died mid-way.
+      mtime="$(/usr/bin/stat -f %m "$LOCK" 2>/dev/null || print 0)"
+      if (( EPOCHSECONDS - mtime < 60 )); then
+        err "another switch is in progress"; return $EX_LOCKED
+      fi
+    fi
+    rm -rf "$LOCK"            # stale: owner is gone
+    tries=$((tries + 1))
+  done
+  err "could not take the lock"; return $EX_LOCKED
+}
+
+# ---------------------------------------------------------------------- rename
+RENAME_N=0
+do_rename() {
+  RENAME_N=$((RENAME_N + 1))
+  if [[ -n "${CLAUDE_SWITCH_FAIL_RENAME:-}" && "$RENAME_N" == "$CLAUDE_SWITCH_FAIL_RENAME" ]]; then
+    return 1
+  fi
+  [[ -e "$2" ]] && return 1
+  /bin/mv "$1" "$2" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------- switch
+# do_switch <target> <must_be_new:0|1>
+do_switch() {
+  local target="$1" must_be_new="$2"
+  valid_name "$target" || { err "invalid profile name: '$target'"; return $EX_STATE; }
+
+  detect_state || return $?
+  local current="$CURRENT" label="$NEEDS_LABEL"
+
+  if (( must_be_new )) && { [[ "$target" == "$current" ]] || [[ -e "$PROFILES/$target" ]]; }; then
+    err "profile '$target' already exists"; return $EX_STATE
+  fi
+  if [[ "$target" == "$current" ]]; then
+    print "Already on '$target'"; return $EX_ACTIVE
+  fi
+  if [[ -e "$PROFILES/$current" ]]; then
+    err "stored profile '$current' already exists but is also the live one; refusing"
+    return $EX_STATE
+  fi
+
+  acquire_lock || return $?
+  trap 'release_lock' EXIT
+  trap 'release_lock; exit 130' INT TERM HUP
+
+  # Ask Claude to quit (only if running: quitting a stopped app can launch it).
+  if fx_is_running; then
+    fx_quit
+    local deadline
+    deadline=$(( EPOCHREALTIME + QUIT_TIMEOUT ))
+    while fx_is_running; do
+      if (( EPOCHREALTIME >= deadline )); then
+        release_lock
+        err "Claude did not quit within ${QUIT_TIMEOUT}s; switch cancelled. Close any running sessions and try again."
+        fx_notify "Switch cancelled: Claude did not quit. Close running sessions and retry." || true
+        return $EX_TIMEOUT
+      fi
+      sleep "$POLL_INTERVAL"
+    done
+  fi
+
+  # State could have changed while waiting; re-check.
+  detect_state || { release_lock; return $?; }
+  [[ "$CURRENT" == "$current" ]] || { release_lock; err "state changed during switch"; return $EX_STATE; }
+
+  local wrote_label=0 created_target=0 moved_out=0
+  rollback() {
+    (( moved_out )) && [[ ! -e "$LIVE" ]] && /bin/mv "$PROFILES/$current" "$LIVE" 2>/dev/null
+    (( created_target )) && rm -rf "$PROFILES/$target"
+    (( wrote_label )) && rm -f "$LIVE/$MARKER"
+  }
+
+  mkdir -p "$PROFILES" 2>/dev/null || { release_lock; err "cannot create $PROFILES"; return $EX_RENAME; }
+
+  if (( label )); then
+    print -r -- "$current" > "$LIVE/$MARKER" 2>/dev/null \
+      || { release_lock; err "cannot label live folder"; return $EX_RENAME; }
+    wrote_label=1
+  fi
+
+  # Prepare the target first (create it empty if it doesn't exist).
+  if [[ ! -d "$PROFILES/$target" ]]; then
+    if mkdir "$PROFILES/$target" 2>/dev/null && print -r -- "$target" > "$PROFILES/$target/$MARKER" 2>/dev/null; then
+      created_target=1
+    else
+      rm -rf "$PROFILES/$target" 2>/dev/null
+      rollback; release_lock
+      err "cannot create profile '$target'"; return $EX_RENAME
+    fi
+  elif [[ ! -f "$PROFILES/$target/$MARKER" ]]; then
+    print -r -- "$target" > "$PROFILES/$target/$MARKER" 2>/dev/null
+  fi
+
+  # Step 5: live -> Claude-profiles/<current>
+  if ! do_rename "$LIVE" "$PROFILES/$current"; then
+    rollback; release_lock
+    err "rename failed (live folder -> stored profile); nothing changed"
+    return $EX_RENAME
+  fi
+  moved_out=1
+
+  # Step 6: Claude-profiles/<target> -> live
+  if ! do_rename "$PROFILES/$target" "$LIVE"; then
+    rollback; release_lock
+    err "rename failed (profile '$target' -> live folder); rolled back"
+    return $EX_RENAME
+  fi
+
+  release_lock
+  fx_launch || err "warning: could not launch Claude"
+  fx_notify "Claude → $target" || true
+  fx_refresh || true
+  print "Switched '$current' -> '$target'"
+  return $EX_OK
+}
+
+# -------------------------------------------------------------------- commands
+cmd_status() {
+  detect_state || return $?
+  print -r -- "$CURRENT"
+}
+
+cmd_list() {
+  detect_state || return $?
+  local n
+  { print -r -- "$CURRENT"; stored_profiles; } | LC_ALL=C sort -u | while IFS= read -r n; do
+    if [[ "$n" == "$CURRENT" ]]; then print -r -- "* $n"; else print -r -- "  $n"; fi
+  done
+}
+
+cmd_toggle() {
+  detect_state || return $?
+  local -a others
+  others=( ${(f)"$(stored_profiles | grep -vxF -- "$CURRENT")"} )
+  if (( ${#others} != 1 )); then
+    err "toggle needs exactly two profiles (found $(( ${#others} + 1 )))"
+    return $EX_STATE
+  fi
+  do_switch "${others[1]}" 0
+}
+
+cmd_menu() {
+  local n
+  if ! detect_state 2>/dev/null; then
+    print -r -- "✳ ?"
+    print -r -- "---"
+    print -r -- "$LAST_ERR | color=red"
+    print -r -- "---"
+    print -r -- "Open profiles folder | bash=/usr/bin/open param1=\"$PROFILES\" terminal=false"
+    return 0
+  fi
+  print -r -- "✳ $CURRENT"
+  print -r -- "---"
+  { print -r -- "$CURRENT"; stored_profiles; } | LC_ALL=C sort -u | while IFS= read -r n; do
+    if [[ "$n" == "$CURRENT" ]]; then
+      print -r -- "$n | checked=true disabled=true"
+    else
+      print -r -- "$n | bash=\"$SELF\" param1=$n terminal=false refresh=true"
+    fi
+  done
+  print -r -- "---"
+  print -r -- "New profile… | bash=\"$SELF\" param1=new-prompt terminal=false refresh=true"
+  print -r -- "Open profiles folder | bash=/usr/bin/open param1=\"$PROFILES\" terminal=false"
+}
+
+# Internal: ask for a name with a dialog, then run `new <name>`.
+cmd_new_prompt() {
+  local name
+  name="$(/usr/bin/osascript -e 'text returned of (display dialog "New Claude profile name:" default answer "" buttons {"Cancel", "Create"} default button "Create")' 2>/dev/null)" || return 0
+  [[ -n "$name" ]] || return 0
+  "$SELF" new "$name"
+  local rc=$?
+  (( rc != 0 )) && /usr/bin/osascript -e 'display notification "Could not create profile (see claude-switch new)" with title "claude-switch"' >/dev/null 2>&1
+  return $rc
+}
+
+usage() {
+  cat <<'EOF'
+usage: claude-switch <name> | toggle | status | list | new <name> | menu
+exit codes: 0 ok, 2 usage, 10 already active, 11 Claude did not quit,
+            12 lock held, 13 invalid name/state, 14 rename failed (rolled back)
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    "")            usage >&2; return $EX_USAGE ;;
+    help|-h|--help) usage; return 0 ;;
+    status)        cmd_status ;;
+    list)          cmd_list ;;
+    toggle)        cmd_toggle ;;
+    menu)          cmd_menu ;;
+    new-prompt)    cmd_new_prompt ;;
+    new)
+      [[ $# -eq 2 ]] || { usage >&2; return $EX_USAGE; }
+      do_switch "$2" 1 ;;
+    *)
+      [[ $# -eq 1 ]] || { usage >&2; return $EX_USAGE; }
+      do_switch "$1" 0 ;;
+  esac
+}
+
+main "$@"
+exit $?
