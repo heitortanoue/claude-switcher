@@ -50,10 +50,10 @@ SWITCHING_STALE=60      # a "switching" state older than this is ignored (crashe
 CANCELLED_SHOW=10       # how long the red cancelled header is shown
 PALETTE_NAMES=("Claude orange" Red Amber Green Teal Blue Purple Pink Gray)
 PALETTE_HEX=(  "#D97757" "#E5484D" "#F5A524" "#30A46C" "#12A594" "#3E8EDF" "#8E4EC6" "#E93D82" "#8B8D98")
-ICONS=(briefcase.fill house.fill laptopcomputer building.2.fill graduationcap.fill star.fill
+ICONS=(asterisk briefcase.fill house.fill laptopcomputer building.2.fill graduationcap.fill star.fill
        heart.fill flame.fill bolt.fill leaf.fill globe terminal.fill flask.fill book.fill
        gamecontroller.fill person.crop.circle.fill)
-ICON_LABELS=(Briefcase House Laptop Building "Graduation cap" Star
+ICON_LABELS=(Claude Briefcase House Laptop Building "Graduation cap" Star
        Heart Flame Bolt Leaf Globe Terminal Flask Book
        "Game controller" Person)
 DEFAULT_ICON="person.crop.circle.fill"
@@ -427,8 +427,8 @@ compute_styles() {
   done
   for n in "$@"; do
     if [[ -n "${CONF_ICON[$n]:-}" ]]; then STYLE_ICON[$n]="${CONF_ICON[$n]}"
-    elif [[ "$n" == work ]]; then STYLE_ICON[$n]="${ICONS[1]}"
-    elif [[ "$n" == personal ]]; then STYLE_ICON[$n]="${ICONS[2]}"
+    elif [[ "$n" == work ]]; then STYLE_ICON[$n]="briefcase.fill"
+    elif [[ "$n" == personal ]]; then STYLE_ICON[$n]="house.fill"
     else STYLE_ICON[$n]="$DEFAULT_ICON"; fi
   done
 }

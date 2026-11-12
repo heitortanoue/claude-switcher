@@ -528,10 +528,10 @@ mk_cli_json() { # <path> <email> <org>
   mk_live W work; mk_profile personal P
   cli_setup
   echo work > "$T/home/.claude-profiles/.default-owner" 2>/dev/null || { mkdir -p "$T/home/.claude-profiles"; echo work > "$T/home/.claude-profiles/.default-owner"; }
-  mk_cli_json "$T/home/.claude.json" heitor@x.com "Acme Org"
+  mk_cli_json "$T/home/.claude.json" user@example.com "Acme Org"
   mk_cli_json "$T/home/.claude-profiles/personal/.claude.json" me@home.org ""
   run menu_plain
-  [[ "$output" == *$'\nwork — heitor@x.com · Acme Org | checked=true disabled=true'* ]] || false
+  [[ "$output" == *$'\nwork — user@example.com · Acme Org | checked=true disabled=true'* ]] || false
   [[ "$output" == *$'\npersonal — me@home.org | bash='* ]] || false
 }
 
@@ -564,8 +564,8 @@ mk_cli_json() { # <path> <email> <org>
   b="$(echo "$output" | grep -n '^Customize$' | cut -d: -f1)"
   c="$(echo "$output" | grep -n '^Open profiles folder' | cut -d: -f1)"
   [ "$a" -lt "$b" ]; [ "$b" -lt "$c" ]
-  # 16 icons per profile, each shown as its own sfimage
-  [ "$(echo "$output" | grep -c '^------[A-Za-z ]* | sfimage=[a-z0-9.]* sfcolor=#[0-9A-F]*\( checked=true\)\{0,1\} bash=.*param1=set-icon')" -eq 32 ]
+  # 17 icons per profile, each shown as its own sfimage
+  [ "$(echo "$output" | grep -c '^------[A-Za-z ]* | sfimage=[a-z0-9.]* sfcolor=#[0-9A-F]*\( checked=true\)\{0,1\} bash=.*param1=set-icon')" -eq 34 ]
   [[ "$output" == *$'\n------Game controller | sfimage=gamecontroller.fill sfcolor=#D97757 bash="'*'claude-switch" param1=set-icon param2=work param3=gamecontroller.fill terminal=false refresh=true'* ]] || false
   [[ "$output" == *"------Other symbol… | "*"param1=icon-prompt param2=work"* ]] || false
   # 9 color presets per profile with dots, plus Custom…
